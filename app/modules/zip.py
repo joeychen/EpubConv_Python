@@ -1,88 +1,71 @@
-import logging
-import os
-import pathlib
-import zipfile as zf
+from __future__ import annotations
+
+import shutil
+from pathlib import Path, PurePosixPath
+from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile
 
 from loguru import logger
 
-from app.Engines.opencc import OpenCCEngine
-from app.Enums.ConverterEnum import ConverterEnum, FilenameConverter
-from config.config import Config
-
-opencc = OpenCCEngine()
+from app.engines.opencc import OpenCCEngine
+from app.enums.converter import FILENAME_CONVERTERS
+from config.config import AppConfig
 
 
-class ZIP():
-    def __init__(self):
-        ...
+class EpubArchive:
+    """Safely extract and rebuild EPUB ZIP containers."""
 
     @staticmethod
-    def compress(epub_absolute_path: str) -> None:
-        """將轉換後的資料夾內容壓縮回 epub
+    def extract(source: Path, destination: Path) -> None:
+        if destination.exists():
+            raise FileExistsError(f"temporary directory already exists: {destination}")
+        destination.mkdir()
 
-        Args:
-            filename (str): 原始檔案的絕對路徑名稱
-        """
-        dirname = os.path.dirname(epub_absolute_path)
-        file_list = []
-        for root, _dirs, files in os.walk(f'{epub_absolute_path}_files/'):
-            for name in files:
-                file_list.append(os.path.join(root, name))
-        new_filename = ZIP.convert_filename(epub_absolute_path)
-        save_as = os.path.join(dirname, new_filename)
-        if Config.ADD_SUFFIX:
-            filename_with_suffix = f"{pathlib.Path(new_filename).stem}_{Config.CONVERTER}.epub"
-            save_as = pathlib.Path(dirname).joinpath(filename_with_suffix)
-        with zf.ZipFile(save_as, 'w', zf.zlib.DEFLATED) as z_f:
-            for file in file_list:
-                logger.debug(file)
-                arc_name = file[len(f'{epub_absolute_path}_files'):]
-                z_f.write(file, arc_name)
+        try:
+            with ZipFile(source) as archive:
+                for member in archive.infolist():
+                    member_path = PurePosixPath(member.filename.replace("\\", "/"))
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        raise BadZipFile(f"unsafe archive member: {member.filename!r}")
+                archive.extractall(destination)
+        except Exception:
+            shutil.rmtree(destination)
+            raise
 
     @staticmethod
-    def extract(epub_absolute_path: str) -> None:
-        """將 epub 解壓縮到資料夾中
+    def output_path(source: Path, config: AppConfig) -> Path:
+        filename_converter = FILENAME_CONVERTERS.get(config.converter, "s2t")
+        converted_name = OpenCCEngine().filename_convert(filename_converter, source.name)
+        output = source.with_name(converted_name)
+        if config.add_suffix:
+            output = output.with_name(f"{output.stem}_{config.converter}.epub")
+        elif output == source:
+            output = source.with_name(f"{source.stem}_converted.epub")
+        return output
 
-        Args:
-            epub_absolute_path (str): 檔案的絕對路徑名稱
-        """
-        zipfile = zf.ZipFile(epub_absolute_path)
-        PATH = f'{epub_absolute_path}_files/'
-        if os.path.isdir(PATH):
-            pass
-        else:
-            os.mkdir(PATH)
-        for names in zipfile.namelist():
-            zipfile.extract(names, PATH)
+    @classmethod
+    def compress(cls, source: Path, extracted: Path, config: AppConfig) -> Path:
+        output = cls.output_path(source, config)
+        if output.exists():
+            raise FileExistsError(f"output file already exists: {output}")
 
-    @staticmethod
-    def zipfile(epub_absolute_path: str) -> zf.ZipFile:
-        """取得 epub 的 zipfile 物件
+        temporary = output.with_name(f"{output.name}.tmp")
+        if temporary.exists():
+            raise FileExistsError(f"temporary output already exists: {temporary}")
 
-        Args:
-            epub_absolute_path (str): 檔案的絕對路徑名稱
-
-        Returns:
-            zf.ZipFile: zipfile 物件
-        """
-        return zf.ZipFile(epub_absolute_path)
-
-    @staticmethod
-    def convert_filename(epub_absolute_path: str) -> str:
-        """轉換 epub 檔案名稱
-
-        Args:
-            epub_absolute_path (str): 檔案的絕對路徑名稱
-
-        Returns:
-            str: 轉換後的檔案名稱
-        """
-        converter: FilenameConverter = getattr(ConverterEnum.filename.value,
-                                               Config.CONVERTER, None)
-        if converter is None:
-            converter = 's2t'
-        # 僅取得檔案名稱不含路徑
-        filename_with_extension = os.path.basename(epub_absolute_path)
-        new_filename = opencc.filename_convert(
-            converter.value, filename_with_extension)
-        return new_filename
+        files = sorted(path for path in extracted.rglob("*") if path.is_file())
+        mimetype = extracted / "mimetype"
+        try:
+            with ZipFile(temporary, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
+                if mimetype.is_file():
+                    archive.write(mimetype, "mimetype", compress_type=ZIP_STORED)
+                for file in files:
+                    if file == mimetype:
+                        continue
+                    archive_name = file.relative_to(extracted).as_posix()
+                    logger.debug("壓縮: {}", archive_name)
+                    archive.write(file, archive_name, compress_type=ZIP_DEFLATED)
+            temporary.replace(output)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        return output

@@ -1,50 +1,51 @@
-import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import aiohttp
 import pytest
 
-from app.Engines.fanhuaji import FanhuajiEngine
-from app.Enums.EngineEnum import EngineEnum
+from app.engines.fanhuaji import CHUNK_SIZE, FanhuajiEngine
 
 
-class TestFanhuaji():
-    @classmethod
-    def setup_class(cls):
-        cls.fanhuaji = FanhuajiEngine()
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+def test_fanhuaji_sync_conversion_uses_post() -> None:
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.json.return_value = {"data": {"text": "繁體內容"}}
 
-    def test_fanhuaji_convert_s2t(self):
-        params = {
-            'chapters': [
-                {'path': 'test_fanhuaji_convert_s2t.html',
-                 'content': '使用 Python 撰写，epub 档案繁简横直互转'}
+    with patch("app.engines.fanhuaji.requests.post", return_value=response) as post:
+        result = FanhuajiEngine().convert(
+            converter="s2t",
+            chapters=[{"path": "chapter.xhtml", "content": "简体内容"}],
+        )
+
+    assert result == [{"path": "chapter.xhtml", "content": "繁體內容"}]
+    post.assert_called_once()
+    assert post.call_args.kwargs["data"]["converter"] == "Traditional"
+    response.raise_for_status.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_fanhuaji_async_conversion_preserves_chapter_order() -> None:
+    engine = FanhuajiEngine()
+    conversion = AsyncMock(side_effect=["第一章", "第二章"])
+    with patch.object(engine, "_convert_text_async", conversion):
+        result = await engine.async_convert(
+            converter="s2t",
+            chapters=[
+                {"path": "one.xhtml", "content": "第一章简体"},
+                {"path": "two.xhtml", "content": "第二章简体"},
             ],
-            'converter': 's2t'
-        }
-        ans = [{'content': '使用 Python 撰寫，epub 檔案繁簡橫直互轉',
-                'path': 'test_fanhuaji_convert_s2t.html'}]
-        text = self.fanhuaji.convert(**params)
-        assert text == ans
+        )
 
-    @pytest.mark.asyncio
-    async def test_async_convert(self):
-        asyncio.set_event_loop_policy(
-            asyncio.WindowsSelectorEventLoopPolicy())
-        params = {
-            'chapters': [
-                {'path': 'test_fanhuaji_convert_s2t_async.html',
-                 'content': '使用 Python 撰写，epub 档案繁简横直互转'},
-                {'path': 'test_fanhuaji_convert_s2t_async2.html',
-                 'content': '并且使用异步处理'},
-                {'path': 'test_fanhuaji_convert_s2t_async3.html',
-                 'content': '非同期処理を使用する'}
-            ],
-            'converter': 's2t'
-        }
-        ans = [
-            {'path': 'test_fanhuaji_convert_s2t_async.html',
-                'content': '使用 Python 撰寫，epub 檔案繁簡橫直互轉'},
-            {'path': 'test_fanhuaji_convert_s2t_async2.html', 'content': '並且使用異步處理'},
-            {'path': 'test_fanhuaji_convert_s2t_async3.html', 'content': '非同期処理を使用する'}]
-        result = await self.fanhuaji.async_convert(**params)
-        assert result == ans
+    assert result == [
+        {"path": "one.xhtml", "content": "第一章"},
+        {"path": "two.xhtml", "content": "第二章"},
+    ]
+
+
+def test_fanhuaji_chunking_has_no_empty_trailing_chunk() -> None:
+    chunks = list(FanhuajiEngine._chunks("x" * (CHUNK_SIZE * 2)))
+    assert [len(chunk) for chunk in chunks] == [CHUNK_SIZE, CHUNK_SIZE]
+
+
+def test_fanhuaji_rejects_unknown_converter() -> None:
+    with pytest.raises(ValueError, match="unsupported Fanhuaji converter"):
+        FanhuajiEngine().convert(converter="unknown", chapters=[])

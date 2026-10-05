@@ -1,161 +1,119 @@
-import os
-import pathlib
+from __future__ import annotations
+
 import shutil
-import sys
-import zipfile
+from pathlib import Path
+from xml.etree import ElementTree
+from zipfile import is_zipfile
 
 from loguru import logger
 
-from app.Modules.convert import Convert
-from app.Modules.opf import OPF
-from app.Modules.renamer import ReNamer
-from app.Modules.utils import file_encoding
-from app.Modules.writing_format import WritingFormat
-from app.Modules.zip import ZIP
+from app.models import Chapter, Chapters
+from app.modules.convert import convert_chapters
+from app.modules.opf import update_language
+from app.modules.renamer import publish_converted_file
+from app.modules.utils import file_encoding
+from app.modules.writing_format import WritingFormatConverter
+from app.modules.zip import EpubArchive
+from config.config import AppConfig
+
+_CONTENT_SUFFIXES = {".htm", ".html", ".ncx", ".opf", ".txt", ".xhtml"}
 
 
-class EPUBConv():
-    def __init__(self, epub_abs_path: str) -> None:
-        logger.info(f'正在處理 epub: {pathlib.Path(repr(epub_abs_path))}')
-        self.work_path = os.path.abspath(
-            os.path.join(sys.argv[0], os.path.pardir))
-        self.epub_abs_path = pathlib.Path(repr(epub_abs_path).strip("'"))
+class EpubFiles:
+    """Discover files inside an extracted EPUB directory."""
 
-    def epub_extract(self) -> None:
-        """解壓縮 epub 檔案"""
-        ZIP.extract(self.epub_abs_path)
-
-    def epub_compress(self) -> None:
-        """壓縮 epub 檔案"""
-        ZIP.compress(self.epub_abs_path)
+    def __init__(self, extracted_path: Path) -> None:
+        self.extracted_path = extracted_path
 
     @property
-    def epub_file(self):
-        """epub 檔案物件
-        """
-        zipfile = ZIP.zipfile(self.epub_abs_path)
-        return EpubFile(zipfile, self.epub_abs_path)
-
-    @property
-    def epub_extract_path(self) -> str:
-        """epub解壓縮的絕對路徑"""
-        return f'{self.epub_abs_path}_files/'
-
-    def opf_convert(self, opf_absolute_path: str) -> None:
-        """OPF 檔案轉換
-
-        Args:
-            opf_absolute_path (str): OPF 檔案的絕對路徑
-        """
-        opf_file = OPF(opf_absolute_path+'.new')
-        opf_file.language()  # 語言標籤轉換
-
-    def content_convert(self, content_absolute_paths: list) -> None:
-        """內容檔案轉換
-
-        Args:
-            content_absolute_paths (list): 內容檔案的絕對路徑
-        """
-        chapters = []
-        for content_absolute_path in content_absolute_paths:
-            encoding = file_encoding(content_absolute_path)
-            with open(content_absolute_path, 'r', encoding=encoding) as file:
-                content = file.read()
-            chapter = {
-                'path': content_absolute_path,
-                'content': content
-            }
-            chapters.append(chapter)
-        converted_chapters = Convert.convert(chapters)
-        for chapter in converted_chapters:
-            with open(chapter['path']+'.new', 'w', encoding='utf-8') as file:
-                file.write(chapter['content'])
-
-    def file_rename(self, files: list) -> None:
-        """檔案重新命名
-
-        Args:
-            files (str): 檔案的絕對路徑清單
-        """
-        for file in files:
-            ReNamer(file).rename()
-
-    def writing_format(
-        self,
-        opf_path: str,
-        epub_extract_path: str,
-        css_files: str,
-        content_files: str,
-    ) -> None:
-        """
-        設定電子書檔案書寫格式的函數。
-
-        Args:
-            opf_path (str): OPF 檔案的路徑。
-            epub_extract_path (str): EPUB 解壓縮的路徑。
-            css_files (str): CSS 檔案的路徑。
-            content_files (str): 內容檔案的路徑。
-
-        Returns:
-            None
-        """
-        WritingFormat().format(
-            opf_path,
-            epub_extract_path,
-            css_files,
-            content_files,
+    def content_files(self) -> list[Path]:
+        return sorted(
+            path
+            for path in self.extracted_path.rglob("*")
+            if path.is_file() and path.suffix.lower() in _CONTENT_SUFFIXES
         )
 
+    @property
+    def css_files(self) -> list[Path]:
+        return sorted(self.extracted_path.rglob("*.css"))
+
+    @property
+    def opf_file(self) -> Path:
+        container_path = self.extracted_path / "META-INF" / "container.xml"
+        if container_path.is_file():
+            tree = ElementTree.parse(container_path)
+            rootfile = next(
+                (
+                    element
+                    for element in tree.iter()
+                    if element.tag.rsplit("}", 1)[-1] == "rootfile" and element.get("full-path")
+                ),
+                None,
+            )
+            if rootfile is not None:
+                candidate = (self.extracted_path / str(rootfile.get("full-path"))).resolve()
+                if candidate.is_relative_to(self.extracted_path.resolve()) and candidate.is_file():
+                    return candidate
+
+        candidates = sorted(self.extracted_path.rglob("*.opf"))
+        if not candidates:
+            raise FileNotFoundError("EPUB contains no OPF package document")
+        return candidates[0]
+
+
+class EpubConverter:
+    """Coordinate extraction, conversion, formatting, and EPUB rebuilding."""
+
+    def __init__(self, epub_path: str | Path, config: AppConfig) -> None:
+        self.source = Path(epub_path).expanduser().resolve()
+        self.config = config
+        self.extracted_path = self.source.with_name(f"{self.source.name}_files")
+
+        if not self.source.is_file():
+            raise FileNotFoundError(f"EPUB file does not exist: {self.source}")
+        if self.source.suffix.lower() != ".epub":
+            raise ValueError(f"input file must use the .epub extension: {self.source}")
+        if config.file_check and not is_zipfile(self.source):
+            raise ValueError(f"input is not a valid ZIP/EPUB file: {self.source}")
+
+    def run(self) -> Path:
+        logger.info("正在處理 EPUB: {}", self.source)
+        EpubArchive.extract(self.source, self.extracted_path)
+        try:
+            files = EpubFiles(self.extracted_path)
+            content_files = files.content_files
+            css_files = files.css_files
+            opf_file = files.opf_file
+
+            self._convert_content(content_files)
+            converted_opf = opf_file.with_name(f"{opf_file.name}.new")
+            update_language(converted_opf, self.config.converter)
+            for content_file in content_files:
+                publish_converted_file(content_file)
+
+            WritingFormatConverter(self.config).format(
+                opf_path=opf_file,
+                css_files=css_files,
+                content_files=content_files,
+            )
+            output = EpubArchive.compress(self.source, self.extracted_path, self.config)
+            logger.info("完成: {}", output)
+            return output
+        finally:
+            self.clean()
+
+    def _convert_content(self, content_files: list[Path]) -> None:
+        chapters: Chapters = []
+        for content_file in content_files:
+            content = content_file.read_text(encoding=file_encoding(content_file))
+            chapters.append(Chapter(path=str(content_file), content=content))
+
+        for chapter in convert_chapters(chapters, self.config):
+            original = Path(chapter["path"])
+            converted = original.with_name(f"{original.name}.new")
+            converted.write_text(chapter["content"], encoding="utf-8")
+
     def clean(self) -> None:
-        """ 清除解壓縮後的檔案 """
-        if os.path.isdir(f'{self.epub_abs_path}_files'):
-            logger.info(f'刪除暫存檔案: {self.epub_abs_path}_files')
-            shutil.rmtree(f'{self.epub_abs_path}_files')
-        else:
-            logger.error(f'路徑: {self.epub_abs_path}_files 不存在，刪除失敗。')
-
-
-class EpubFile():
-    def __init__(self, zipfile: zipfile.ZipFile, epub_absolute_path: str) -> None:
-        self.zipfile = zipfile
-        self.epub_absolute_path = epub_absolute_path
-
-    @property
-    def content_files(self) -> list:
-        """小說內容檔案的絕對路徑('ncx', 'opf', 'xhtml', 'html', 'htm', 'txt')
-        """
-        content_extensions = ['ncx', 'opf', 'xhtml', 'html', 'htm', 'txt']
-        extract_path = f'{self.epub_absolute_path}_files/'
-        content_files = []
-        for file in self.zipfile.namelist():
-            if file.endswith(tuple(content_extensions)):
-                content_files.append(os.path.abspath(extract_path + file))
-        return content_files
-
-    @property
-    def css_files(self) -> list:
-        """所有 CSS 的絕對路徑
-        """
-        css_extensions = ['css']
-        extract_path = f'{self.epub_absolute_path}_files/'
-        css_files = []
-        for file in self.zipfile.namelist():
-            if file.endswith(tuple(css_extensions)):
-                css_files.append(os.path.abspath(extract_path + file))
-        return css_files
-
-    @property
-    def opf_file(self) -> str:
-        """OPF 檔案的絕對路徑
-        """
-        opf_extensions = ['opf']
-        extract_path = f'{self.epub_absolute_path}_files/'
-        for file in self.zipfile.namelist():
-            if file.endswith(tuple(opf_extensions)):
-                return (os.path.abspath(extract_path + file))
-
-    @property
-    def epub_extract_path(self) -> str:
-        """epub解壓縮的絕對路徑
-        """
-        return f'{self.epub_absolute_path}_files/'
+        if self.extracted_path.is_dir():
+            logger.debug("刪除暫存目錄: {}", self.extracted_path)
+            shutil.rmtree(self.extracted_path)

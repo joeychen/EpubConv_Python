@@ -1,27 +1,17 @@
-import os
+from __future__ import annotations
+
+import argparse
 import sys
+from collections.abc import Sequence
+from pathlib import Path
 
 from loguru import logger
 
-from app import __VERSION__
-from app.Modules.epubconv import EPUBConv
-from config.config import Config
+from app import __version__
+from app.modules.epubconv import EpubConverter
+from config.config import AppConfig, application_directory
 
-logger.configure(
-    handlers=[
-        {"sink": sys.stdout, "level": Config.STDLEVEL.upper()},
-        {
-            "sink": 'storages/logs/app_{time:YYYY-MM-DD}.log',
-            "level": Config.LOGLEVEL.upper(),
-            "format": '{time} {level} {message}',
-            "rotation": '00:00',
-            "enqueue": True
-        }
-    ]
-)
-
-logger.info(
-    f'''
+BANNER = rf"""
   ______             _      _____
  |  ____|           | |    / ____|
  | |__   _ __  _   _| |__ | |     ___  _ ____   __
@@ -30,28 +20,54 @@ logger.info(
  |______| .__/ \__,_|_.__/ \_____\___/|_| |_|\_/
         | |
         |_|
- v{__VERSION__}'''
-)
+ v{__version__}
+"""
 
-logger.debug(Config)
 
-if __name__ == '__main__':
-    for epub_path in sys.argv[1:]:
-        epubconv = EPUBConv(epub_path)
-        epubconv.epub_extract()
-        content_files = epubconv.epub_file.content_files
-        css_files = epubconv.epub_file.css_files
-        opf_file = epubconv.epub_file.opf_file
-        epubconv.content_convert(content_files)
-        epubconv.opf_convert(opf_file)
-        epubconv.file_rename(content_files)
-        epubconv.writing_format(
-            opf_path=opf_file,
-            epub_extract_path=epubconv.epub_extract_path,
-            css_files=css_files,
-            content_files=content_files
-        )
-        epubconv.epub_compress()
-        epubconv.clean()
-    if Config.ENABLE_PAUSE:
-        os.system('pause')
+def configure_logging(config: AppConfig) -> None:
+    logs_directory = application_directory() / "storages" / "logs"
+    logs_directory.mkdir(parents=True, exist_ok=True)
+    logger.remove()
+    logger.add(sys.stdout, level=config.stdout_level.upper())
+    logger.add(
+        logs_directory / "app_{time:YYYY-MM-DD}.log",
+        level=config.log_level.upper(),
+        format="{time} {level} {message}",
+        rotation="00:00",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="epubconv",
+        description="Convert EPUB files between Simplified and Traditional Chinese.",
+    )
+    parser.add_argument("epub", nargs="*", type=Path, help="EPUB file(s) to convert")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None, config: AppConfig | None = None) -> int:
+    parser = build_parser()
+    arguments = parser.parse_args(argv)
+    if not arguments.epub:
+        parser.error("provide at least one EPUB file")
+
+    config = config or AppConfig.load()
+    configure_logging(config)
+    logger.info(BANNER)
+    exit_code = 0
+    for epub_path in arguments.epub:
+        try:
+            EpubConverter(epub_path, config).run()
+        except Exception:
+            exit_code = 1
+            logger.exception("轉換失敗: {}", epub_path)
+
+    if config.enable_pause and sys.platform == "win32":
+        input("Press Enter to continue...")
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

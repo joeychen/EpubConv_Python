@@ -30,6 +30,8 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!main.spec
+!setting.spec
 
 # Installer logs
 pip-log.txt
@@ -113,3 +115,8 @@ test.py
 OpenCC/
 storages/logs/*
 !.gitkeep
+
+# local tooling
+.codegraph/
+.serena/
+.remember/
