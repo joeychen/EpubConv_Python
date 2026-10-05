@@ -1,65 +1,79 @@
+from pathlib import Path
+
 import pytest
 
-from config.config import AppConfig, AppConfigError, _parse_bool
+from config.config import AppConfig, AppConfigError
 
 
-class TestParseBool():
-    @pytest.mark.parametrize('value', ['true', 'True', 'TRUE', 'yes', '1', True])
-    def test_truthy(self, value):
-        assert _parse_bool(value) is True
+def test_config_loads_ini_and_environment_override(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.ini"
+    config_path.write_text(
+        """
+[ConvertSetting]
+engine=fanhuaji
+converter=s2twp
+format=vertical
+loglevel=warning
+stdlevel=debug
 
-    @pytest.mark.parametrize('value', ['false', 'no', '0', '', 'abc', False])
-    def test_falsy(self, value):
-        assert _parse_bool(value) is False
+[AsyncSetting]
+async_limit=7
+async_limit_per_host=4
+
+[OtherSetting]
+file_check=false
+enable_pause=yes
+add_suffix=0
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = AppConfig.load(config_path, {"ENGINE": "opencc"})
+
+    assert config.engine == "opencc"
+    assert config.converter == "s2twp"
+    assert config.writing_format == "vertical"
+    assert config.async_limit == 7
+    assert config.file_check is False
+    assert config.enable_pause is True
+    assert config.add_suffix is False
 
 
-class TestAppConfig():
-    def test_default_values(self):
-        config = AppConfig({})
-        assert config.ENGINE == 'opencc'
-        assert config.CONVERTER == 's2t'
-        assert config.FORMAT == 'horizontal'
-        assert config.ASYNC_LIMIT == 5
-        assert config.ASYNC_LIMIT_PER_HOST == 10
-        assert config.FILE_CHECK is False
-        assert config.ENABLE_PAUSE is False
-        assert config.ADD_SUFFIX is True
+def test_config_rejects_invalid_boolean(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.ini"
+    config_path.write_text("[OtherSetting]\nfile_check=maybe\n", encoding="utf-8")
+    with pytest.raises(AppConfigError, match="FILE_CHECK"):
+        AppConfig.load(config_path, {})
 
-    def test_read_from_env(self):
-        config = AppConfig({
-            'ENGINE': 'fanhuaji_async',
-            'CONVERTER': 's2twp',
-            'FORMAT': 'vertical',
-        })
-        assert config.ENGINE == 'fanhuaji_async'
-        assert config.CONVERTER == 's2twp'
-        assert config.FORMAT == 'vertical'
 
-    def test_cast_int(self):
-        config = AppConfig({'ASYNC_LIMIT': '3', 'ASYNC_LIMIT_PER_HOST': '4'})
-        assert config.ASYNC_LIMIT == 3
-        assert config.ASYNC_LIMIT_PER_HOST == 4
+def test_config_rejects_malformed_ini(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.ini"
+    config_path.write_text("[ConvertSetting\nengine=opencc\n", encoding="utf-8")
 
-    def test_cast_bool(self):
-        config = AppConfig({'FILE_CHECK': 'true', 'ENABLE_PAUSE': 'yes', 'ADD_SUFFIX': 'false'})
-        assert config.FILE_CHECK is True
-        assert config.ENABLE_PAUSE is True
-        assert config.ADD_SUFFIX is False
+    with pytest.raises(AppConfigError, match="cannot read config file"):
+        AppConfig.load(config_path, {})
 
-    def test_invalid_int_raises(self):
-        with pytest.raises(AppConfigError, match='ASYNC_LIMIT'):
-            AppConfig({'ASYNC_LIMIT': 'abc'})
 
-    def test_required_field_missing_raises(self):
-        class RequiredConfig(AppConfig):
-            REQUIRED: str
+def test_config_save_is_formatted_and_round_trips(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.ini"
+    config = AppConfig(
+        engine="fanhuaji_async",
+        converter="tw2sp",
+        writing_format="vertical",
+        log_level="WARNING",
+        stdout_level="ERROR",
+        async_limit=8,
+        async_limit_per_host=4,
+        file_check=False,
+        enable_pause=True,
+        add_suffix=False,
+    )
 
-        with pytest.raises(AppConfigError, match='REQUIRED'):
-            RequiredConfig({})
+    saved_path = config.save(config_path)
 
-    def test_lowercase_field_is_ignored(self):
-        class LowercaseConfig(AppConfig):
-            lowercase: str = 'default'
-
-        config = LowercaseConfig({'lowercase': 'changed'})
-        assert config.lowercase == 'default'
+    assert saved_path == config_path
+    assert config_path.read_text(encoding="utf-8") == config.to_ini()
+    assert "\n\n[AsyncSetting]\n" in config.to_ini()
+    assert "file_check=false\n" in config.to_ini()
+    assert AppConfig.load(config_path, {}) == config
+    assert not (tmp_path / ".config.ini.tmp").exists()

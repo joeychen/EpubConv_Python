@@ -1,1 +1,3 @@
-__VERSION__ = '3.1.0'
+"""EPUB conversion application."""
+
+__version__ = "3.1.0"
