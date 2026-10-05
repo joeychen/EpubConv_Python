@@ -268,17 +268,17 @@ requires-dist = [
     { name = "chardet", specifier = ">=7.6.0,<8" },
     { name = "cssutils", specifier = ">=2.15.0,<3" },
     { name = "loguru", specifier = ">=0.7.3,<0.8" },
-    { name = "lxml", specifier = ">=6.1.1,<7" },
-    { name = "opencc", specifier = ">=1.4.1,<2" },
+    { name = "lxml", specifier = ">=6.1.3,<7" },
+    { name = "opencc", specifier = ">=1.4.2,<2" },
     { name = "requests", specifier = ">=2.34.2,<3" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "pyinstaller", specifier = ">=6.22.1,<7" },
+    { name = "pyinstaller", specifier = ">=6.22.3,<7" },
     { name = "pytest", specifier = ">=9.1.1,<10" },
     { name = "pytest-asyncio", specifier = ">=1.4.0,<2" },
-    { name = "ruff", specifier = ">=0.16.3,<0.17" },
+    { name = "ruff", specifier = ">=0.16.10,<0.17" },
 ]
 
 [[package]]
