@@ -45,6 +45,14 @@ class FanhuajiEngine:
 
     @staticmethod
     def _converted_text(response_data: dict[str, Any]) -> str:
+        if not isinstance(response_data, dict):
+            raise FanhuajiResponseError("Fanhuaji returned an invalid response")
+        # Fanhuaji reports API errors with HTTP 200, a non-zero code, and empty data.
+        code = response_data.get("code")
+        if code != 0:
+            raise FanhuajiResponseError(
+                f"Fanhuaji API error (code={code}): {response_data.get('msg')}"
+            )
         try:
             return str(response_data["data"]["text"])
         except (KeyError, TypeError) as error:
