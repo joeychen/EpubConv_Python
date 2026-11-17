@@ -23,15 +23,15 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v10.3.0
         with:
-          python-version: '3.12'
+          python-version: '3.14'
           enable-cache: true
 
-      # 版本號寫死在三個地方，tag 建立時必須全部一致，避免 exe 顯示錯誤版本
+      # 版本號寫死在四個地方，tag 建立時必須全部一致，避免 exe 顯示錯誤版本
       - name: Check version
         id: version
         shell: bash
         run: |
-          version=$(sed -nE "s/^__VERSION__ = '([^']+)'.*/\1/p" app/__init__.py)
+          version=$(sed -nE 's/^__version__ = "([^"]+)".*/\1/p' app/__init__.py)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "app/__init__.py: $version"
           if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
@@ -40,17 +40,19 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           fail=0
           if [[ "$version" != "$tag" ]]; then
-            echo "::error file=app/__init__.py::__VERSION__ ($version) 與 tag ($GITHUB_REF_NAME) 不一致"
+            echo "::error file=app/__init__.py::__version__ ($version) 與 tag ($GITHUB_REF_NAME) 不一致"
             fail=1
           fi
           if ! grep -qE "^version = \"$tag\"" pyproject.toml; then
             echo "::error file=pyproject.toml::version 與 tag ($GITHUB_REF_NAME) 不一致"
             fail=1
           fi
-          if ! grep -q "u'FileVersion', u'$tag'" file_version_info.txt || ! grep -q "u'ProductVersion', u'$tag'" file_version_info.txt; then
-            echo "::error file=file_version_info.txt::FileVersion / ProductVersion 與 tag ($GITHUB_REF_NAME) 不一致"
-            fail=1
-          fi
+          for info in file_version_info.txt setting_version_info.txt; do
+            if ! grep -q "u'FileVersion', u'$tag'" "$info" || ! grep -q "u'ProductVersion', u'$tag'" "$info"; then
+              echo "::error file=$info::FileVersion / ProductVersion 與 tag ($GITHUB_REF_NAME) 不一致"
+              fail=1
+            fi
+          done
           exit $fail
 
       - name: Install dependencies
@@ -59,14 +61,16 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
+      # 打包 epubconv.exe 與 setting.exe 並執行 smoke test
       - name: Build
-        run: uv run pyinstaller ./main.spec --clean --noconfirm
+        shell: pwsh
+        run: .\scripts\build_windows.ps1
 
-      # 與 v3.0.0 相同：zip 根目錄只有 EpubConv.exe 與 config.ini
+      # zip 根目錄為 epubconv.exe、setting.exe 與 config.ini
       - name: Package
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/EpubConv.exe, config.ini -DestinationPath "EpubConv.ver${{ steps.version.outputs.version }}.zip"
+          Compress-Archive -Path dist/epubconv.exe, dist/setting.exe, config.ini -DestinationPath "EpubConv.ver${{ steps.version.outputs.version }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
